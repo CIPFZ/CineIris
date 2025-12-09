@@ -1,0 +1,16 @@
+# Qt Creator 生成的构建目录
+build-*/
+*.o
+*.obj
+*.exe
+*.dll
+*.stash
+Makefile*
+.qmake.stash
+
+# 用户配置文件
+*.pro.user
+
+# 临时文件
+debug/
+release/
