@@ -11,7 +11,6 @@
 #include <QGroupBox>
 #include <QFileDialog>
 #include <QMessageBox>
-#include <QDebug>
 #include <QGridLayout>
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -641,26 +640,64 @@ QString MainWindow::formatTime(int64_t seconds) {
     int h = seconds / 3600; int m = (seconds % 3600) / 60; int s = seconds % 60;
     return QString("%1:%2:%3").arg(h, 2, 10, QChar('0')).arg(m, 2, 10, QChar('0')).arg(s, 2, 10, QChar('0'));
 }
+
 void MainWindow::probeVideoInfo(TaskData &task) {
     AVFormatContext *fmtCtx = nullptr;
-    if (avformat_open_input(&fmtCtx, task.filePath.toLocal8Bit().data(), nullptr, nullptr) < 0) return;
-    avformat_find_stream_info(fmtCtx, nullptr);
-    QFileInfo fi(task.filePath); task.fileSize = formatSize(fi.size());
-    if (fmtCtx->duration != AV_NOPTS_VALUE) { task.rawDurationSec = fmtCtx->duration / AV_TIME_BASE; task.durationStr = formatTime(task.rawDurationSec); }
+
+    // [关键修改] Windows 下 FFmpeg 通常建议使用 UTF-8 编码路径
+    // 旧代码: task.filePath.toLocal8Bit().data() -> 可能导致中文路径失败
+    // 新代码: task.filePath.toUtf8().constData()
+    int ret = avformat_open_input(&fmtCtx, task.filePath.toUtf8().constData(), nullptr, nullptr);
+
+    if (ret < 0) {
+        // [调试] 获取 FFmpeg 的错误描述
+        char errbuf[128];
+        av_strerror(ret, errbuf, sizeof(errbuf));
+        return;
+    }
+
+    // 获取流信息
+    ret = avformat_find_stream_info(fmtCtx, nullptr);
+    if (ret < 0) {
+        avformat_close_input(&fmtCtx);
+        return;
+    }
+
+    // 1. 获取文件大小
+    QFileInfo fi(task.filePath);
+    task.fileSize = formatSize(fi.size());
+
+    // 2. 获取时长
+    if (fmtCtx->duration != AV_NOPTS_VALUE) {
+        task.rawDurationSec = fmtCtx->duration / AV_TIME_BASE;
+        task.durationStr = formatTime(task.rawDurationSec);
+    } else {
+    }
+
+    // 3. 查找视频流
+    bool videoFound = false;
     for (unsigned int i = 0; i < fmtCtx->nb_streams; i++) {
-        if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            AVCodecParameters *p = fmtCtx->streams[i]->codecpar;
-            task.rawWidth = p->width; task.rawHeight = p->height;
+        AVStream *st = fmtCtx->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !(st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            AVCodecParameters *p = st->codecpar;
+
+            task.rawWidth = p->width;
+            task.rawHeight = p->height;
             task.resolution = QString("%1 x %2").arg(p->width).arg(p->height);
+
             const AVCodec *codec = avcodec_find_decoder(p->codec_id);
             task.codec = codec ? QString(codec->name) : "Unknown";
+
             if (fmtCtx->streams[i]->avg_frame_rate.den > 0) {
                 double fps = av_q2d(fmtCtx->streams[i]->avg_frame_rate);
                 task.frameRate = QString::number(fps, 'f', 0) + " fps";
             }
+
+            videoFound = true;
             break;
         }
     }
+
     avformat_close_input(&fmtCtx);
 }
 
