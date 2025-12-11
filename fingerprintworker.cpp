@@ -1,6 +1,6 @@
 #include "fingerprintworker.h"
 #include <QtMath>
-#include <QDebug>
+#include <QThread>
 
 FingerprintWorker::FingerprintWorker(QObject *parent) : QObject(parent) {}
 FingerprintWorker::~FingerprintWorker() {}
@@ -10,32 +10,47 @@ void FingerprintWorker::processTask(const TaskData params)
     QString taskId = params.id;
     QString filePath = params.filePath;
 
-    // --- 1. FFmpeg 初始化 ---
     AVFormatContext *fmtCtx = nullptr;
-    if (avformat_open_input(&fmtCtx, filePath.toLocal8Bit().data(), nullptr, nullptr) < 0) {
+    // 1. 打开文件
+    if (avformat_open_input(&fmtCtx, filePath.toUtf8().constData(), nullptr, nullptr) < 0) {
         emit errorOccurred(taskId, "无法打开视频文件");
         return;
     }
+
     if (avformat_find_stream_info(fmtCtx, nullptr) < 0) {
         avformat_close_input(&fmtCtx);
         emit errorOccurred(taskId, "无法读取流信息");
         return;
     }
 
+    // 2. 查找正片视频流 (排除封面)
     int videoStreamIndex = -1;
     for (unsigned int i = 0; i < fmtCtx->nb_streams; i++) {
-        if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        AVStream *st = fmtCtx->streams[i];
+        if (st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !(st->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
             videoStreamIndex = i;
             break;
         }
     }
+
+    if (videoStreamIndex == -1) {
+        // 兜底：随便找一个视频流
+        for (unsigned int i = 0; i < fmtCtx->nb_streams; i++) {
+            if (fmtCtx->streams[i]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+                videoStreamIndex = i;
+                break;
+            }
+        }
+    }
+
     if (videoStreamIndex == -1) {
         avformat_close_input(&fmtCtx);
         emit errorOccurred(taskId, "未找到视频流");
         return;
     }
 
-    AVCodecParameters *codecPar = fmtCtx->streams[videoStreamIndex]->codecpar;
+    AVStream *videoStream = fmtCtx->streams[videoStreamIndex];
+    AVCodecParameters *codecPar = videoStream->codecpar;
     const AVCodec *codec = avcodec_find_decoder(codecPar->codec_id);
     AVCodecContext *codecCtx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(codecCtx, codecPar);
@@ -47,74 +62,89 @@ void FingerprintWorker::processTask(const TaskData params)
         return;
     }
 
-    // --- 2. 图像转换准备 (采样高度固定600) ---
+    // --- 准备数据 ---
     int targetH = 600;
-    struct SwsContext *swsCtx = sws_getContext(
-        codecCtx->width, codecCtx->height, codecCtx->pix_fmt,
-        1, targetH, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr
-    );
+    int safeW = 32;
+    struct SwsContext *swsCtx = nullptr;
 
     AVFrame *pFrame = av_frame_alloc();
     AVFrame *pFrameRGB = av_frame_alloc();
     AVPacket *packet = av_packet_alloc();
-    int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, 1, targetH, 1);
-    uint8_t *buffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
-    av_image_fill_arrays(pFrameRGB->data, pFrameRGB->linesize, buffer, AV_PIX_FMT_RGB24, 1, targetH, 1);
 
-    // --- 3. 抽帧循环 ---
+    int numBytes = av_image_get_buffer_size(AV_PIX_FMT_RGB24, safeW, targetH, 1);
+    uint8_t *buffer = (uint8_t *)av_malloc(numBytes * sizeof(uint8_t));
+    av_image_fill_arrays(pFrameRGB->data, pFrameRGB->linesize, buffer, AV_PIX_FMT_RGB24, safeW, targetH, 1);
+
     int maxStripes = params.sampleCount;
     if (maxStripes <= 0) maxStripes = 1000;
 
     QImage linearMap(maxStripes, targetH, QImage::Format_RGB888);
     linearMap.fill(Qt::black);
 
-    int64_t totalDuration = fmtCtx->duration;
-    if (totalDuration <= 0) totalDuration = 10 * AV_TIME_BASE;
+    // 计算时长 (使用流的时长，如果流没有，用容器的)
+    int64_t totalDuration = videoStream->duration;
+    AVRational timeBase = videoStream->time_base;
 
-    AVRational timeBase = fmtCtx->streams[videoStreamIndex]->time_base;
-    int64_t streamDuration = av_rescale_q(totalDuration, AV_TIME_BASE_Q, timeBase);
-    int64_t step = streamDuration / maxStripes;
-
-    int currentStripe = 0;
-    for (int i = 0; i < maxStripes; ++i) {
-        // [新增] 响应中断请求 (用于暂停或删除)
-        if (QThread::currentThread()->isInterruptionRequested()) {
-            // 清理并退出
-            avcodec_free_context(&codecCtx);
-            avformat_close_input(&fmtCtx);
-            av_free(buffer);
-            av_frame_free(&pFrame);
-            av_frame_free(&pFrameRGB);
-            av_packet_free(&packet);
-            sws_freeContext(swsCtx);
-            return; // 直接结束
+    if (totalDuration <= 0) {
+        // 回退到容器时长
+        if (fmtCtx->duration != AV_NOPTS_VALUE) {
+            totalDuration = av_rescale_q(fmtCtx->duration, AV_TIME_BASE_Q, timeBase);
+        } else {
+            totalDuration = 100 * timeBase.den; // 假数据防止除0
         }
+    }
+
+    int64_t step = totalDuration / maxStripes;
+    int currentStripe = 0;
+    int validFrames = 0;
+
+    // --- 循环开始 ---
+    for (int i = 0; i < maxStripes; ++i) {
+        if (QThread::currentThread()->isInterruptionRequested()) break;
 
         int64_t targetTimestamp = i * step;
+
         av_seek_frame(fmtCtx, videoStreamIndex, targetTimestamp, AVSEEK_FLAG_BACKWARD);
         avcodec_flush_buffers(codecCtx);
 
         bool frameDecoded = false;
         int attempts = 0;
-        while (av_read_frame(fmtCtx, packet) >= 0 && attempts < 15) {
+
+        while (av_read_frame(fmtCtx, packet) >= 0 && attempts < 50) {
             if (packet->stream_index == videoStreamIndex) {
                 if (avcodec_send_packet(codecCtx, packet) == 0) {
                     if (avcodec_receive_frame(codecCtx, pFrame) == 0) {
+
+                        // 懒加载 swsCtx
+                        if (swsCtx == nullptr) {
+                            swsCtx = sws_getContext(
+                                pFrame->width, pFrame->height, (AVPixelFormat)pFrame->format,
+                                safeW, targetH, AV_PIX_FMT_RGB24,
+                                SWS_BILINEAR, nullptr, nullptr, nullptr
+                            );
+                        }
+
+                        // 转换
                         sws_scale(swsCtx, (uint8_t const * const *)pFrame->data,
-                                  pFrame->linesize, 0, codecCtx->height,
+                                  pFrame->linesize, 0, pFrame->height,
                                   pFrameRGB->data, pFrameRGB->linesize);
 
-                        // [修复] 边界检查，防止崩溃
+                        // 写入 QImage
                         if (currentStripe < linearMap.width()) {
+                            // 取色
+                            int centerCol = safeW / 2;
+                            int stride = pFrameRGB->linesize[0];
+
                             for (int y = 0; y < targetH; ++y) {
-                                uint8_t r = pFrameRGB->data[0][y * pFrameRGB->linesize[0]];
-                                uint8_t g = pFrameRGB->data[0][y * pFrameRGB->linesize[0] + 1];
-                                uint8_t b = pFrameRGB->data[0][y * pFrameRGB->linesize[0] + 2];
+                                int offset = y * stride + centerCol * 3;
+                                uint8_t r = pFrameRGB->data[0][offset];
+                                uint8_t g = pFrameRGB->data[0][offset + 1];
+                                uint8_t b = pFrameRGB->data[0][offset + 2];
                                 linearMap.setPixel(currentStripe, y, qRgb(r, g, b));
                             }
                         }
                         frameDecoded = true;
+                        validFrames++;
                     }
                 }
             }
@@ -123,11 +153,14 @@ void FingerprintWorker::processTask(const TaskData params)
             attempts++;
         }
         currentStripe++;
-        if (currentStripe % 10 == 0) emit progressUpdated(taskId, currentStripe * 100 / maxStripes);
+
+        if (currentStripe % 20 == 0 || currentStripe == maxStripes) {
+            emit progressUpdated(taskId, (int)((float)currentStripe / maxStripes * 100));
+        }
     }
 
-    // --- 4. 结果生成 ---
-    if (currentStripe > 0) {
+    // --- 结果生成 ---
+    if (currentStripe > 0 && !QThread::currentThread()->isInterruptionRequested()) {
         QImage validLinear = linearMap.copy(0, 0, qMin(currentStripe, linearMap.width()), targetH);
         QImage finalResult;
 
@@ -138,23 +171,24 @@ void FingerprintWorker::processTask(const TaskData params)
         }
         emit finished(taskId, finalResult);
     } else {
-        emit errorOccurred(taskId, "未提取到任何帧");
+        if (!QThread::currentThread()->isInterruptionRequested())
+            emit errorOccurred(taskId, "未能提取到有效帧");
     }
 
-    // --- 5. 清理 ---
+    // --- 清理 ---
     av_free(buffer);
     av_frame_free(&pFrame);
     av_frame_free(&pFrameRGB);
     av_packet_free(&packet);
     avcodec_free_context(&codecCtx);
     avformat_close_input(&fmtCtx);
-    sws_freeContext(swsCtx);
+    if (swsCtx) sws_freeContext(swsCtx);
 }
 
 QImage FingerprintWorker::convertToIris(const QImage &linearImg, int size)
 {
     int outputSize = size;
-    int holeRadius = outputSize * 0.2;
+    int holeRadius = outputSize * 0.15;
     QImage iris(outputSize, outputSize, QImage::Format_ARGB32);
     iris.fill(Qt::transparent);
 
