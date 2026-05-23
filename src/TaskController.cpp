@@ -2,6 +2,9 @@
 #include "BarcodeGenerator.h"
 #include "VideoProber.h"
 #include <QFileInfo>
+#include <QFile>
+#include <QStandardPaths>
+#include <QDir>
 
 TaskController::TaskController(QObject *parent)
     : QObject(parent) {}
@@ -88,8 +91,24 @@ void TaskController::start()
 
     m_cancelRequested = false;
     m_pauseRequested = false;
-    setStatus(Processing);
-    setProgress(0);
+
+    // Batch all state resets before emitting any signal,
+    // so QML sees progress=0 and resultImage="" atomically.
+    bool statusWillChange = (m_status != Processing);
+    bool progressWillChange = (m_progress != 0);
+    bool resultWillChange = !m_resultImage.isNull() || !m_resultImagePath.isEmpty();
+
+    m_progress = 0;
+    m_resultImage = QImage();
+    if (!m_resultImagePath.isEmpty()) {
+        QFile::remove(m_resultImagePath);
+        m_resultImagePath.clear();
+    }
+    m_status = Processing;
+
+    if (progressWillChange) emit progressChanged();
+    if (resultWillChange) emit resultImageChanged();
+    if (statusWillChange) emit statusChanged();
 
     m_thread = new QThread(this);
     m_generator = new BarcodeGenerator;
@@ -160,6 +179,12 @@ void TaskController::saveResult(const QString &path)
         m_resultImage.save(path);
 }
 
+void TaskController::resetToDefaults()
+{
+    if (m_rawDurationSec <= 0 && m_rawWidth <= 0) return;
+    calculateSmartDefaults();
+}
+
 void TaskController::setStatus(Status s)
 {
     if (m_status != s) { m_status = s; emit statusChanged(); }
@@ -173,5 +198,13 @@ void TaskController::setProgress(int p)
 void TaskController::setResultImage(const QImage &img)
 {
     m_resultImage = img;
+    if (!img.isNull()) {
+        QString dir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+        m_resultImagePath = dir + "/cineiris_result.png";
+        img.save(m_resultImagePath, "PNG");
+    } else {
+        m_resultImagePath.clear();
+        QFile::remove(QStandardPaths::writableLocation(QStandardPaths::TempLocation) + "/cineiris_result.png");
+    }
     emit resultImageChanged();
 }

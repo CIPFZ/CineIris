@@ -1,18 +1,17 @@
 import QtQuick
 import QtQuick.Controls.Basic
+import QtQuick.Layouts
 import QtQuick.Dialogs
 import FluentUI
 
 Rectangle {
     id: root
     color: FluTheme.dark ? "#3A3A3C" : "#F9F9FB"
-    radius: 14
-    border.width: 2
-    border.color: dropArea.containsDrag ? FluTheme.primaryColor : FluTheme.dark ? "#636366" : "#C7C7CC"
+    radius: 10
+    border.width: 1
+    border.color: FluTheme.dark ? "#636366" : "#C7C7CC"
 
     property alias videoPath: pathText.text
-    property string videoLabel: ""
-
     signal fileSelected(string path)
 
     DropArea {
@@ -28,31 +27,21 @@ Rectangle {
             }
         }
 
-        Column {
+        RowLayout {
             anchors.centerIn: parent
             spacing: 12
 
             FluText {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: dropArea.containsDrag ? "📂 释放以导入" : (videoPath ? "🎬" : "📁")
-                font.pixelSize: 36
-            }
-
-            FluText {
                 id: pathText
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: videoPath || "拖拽视频到此处\n或点击下方按钮选择文件"
-                color: videoPath ? FluTheme.fontPrimaryColor : FluTheme.fontSecondaryColor
+                text: ""
+                color: FluTheme.fontPrimaryColor
                 font: FluTextStyle.Body
-                horizontalAlignment: Text.AlignHCenter
-                lineHeight: 1.4
                 elide: Text.ElideMiddle
-                maximumLineCount: 2
+                Layout.maximumWidth: 200
             }
 
             FluButton {
-                anchors.horizontalCenter: parent.horizontalCenter
-                text: videoPath ? "更换视频" : "选择视频文件"
+                text: videoPath ? "更换" : "选择视频"
                 onClicked: {
                     var dialog = fileDialog.createObject(root)
                     dialog.open()

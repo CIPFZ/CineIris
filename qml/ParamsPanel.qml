@@ -11,6 +11,7 @@ Rectangle {
     property int outputSize: 1080
     property int sampleCount: 300
     property int status: 0 // 0=Idle, 1=Processing, 2=Paused, 3=Finished
+    property var videoMeta: null
 
     signal typeChanged(bool v)
     signal sizeChanged(int v)
@@ -84,8 +85,24 @@ Rectangle {
 
         FluDivider { size: 1 }
 
-        // Metadata info (placeholder)
+        // Metadata info
         FluText {
+            visible: root.videoMeta && root.videoMeta["duration"] !== undefined
+            text: root.videoMeta
+                 ? "时长: " + (root.videoMeta["duration"] || "-")
+                   + "  分辨率: " + (root.videoMeta["resolution"] || "-")
+                   + "\n编码: " + (root.videoMeta["codec"] || "-")
+                   + "  帧率: " + (root.videoMeta["frameRate"] || "-")
+                   + "  大小: " + (root.videoMeta["fileSize"] || "-")
+                 : ""
+            color: FluTheme.fontSecondaryColor
+            font: FluTextStyle.Caption
+            wrapMode: Text.WordWrap
+            Layout.fillWidth: true
+        }
+
+        FluText {
+            visible: !root.videoMeta || root.videoMeta["duration"] === undefined
             text: "拖入视频后将显示元数据"
             color: FluTheme.fontSecondaryColor
             font: FluTextStyle.Caption

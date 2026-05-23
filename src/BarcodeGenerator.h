@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QImage>
 #include <QString>
+#include <QVector>
 
 class BarcodeGenerator : public QObject
 {

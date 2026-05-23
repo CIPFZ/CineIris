@@ -16,7 +16,7 @@ class TaskController : public QObject
     Q_PROPERTY(int progress READ progress NOTIFY progressChanged)
     Q_PROPERTY(QString videoPath READ videoPath NOTIFY videoPathChanged)
     Q_PROPERTY(QVariantMap videoMeta READ videoMeta NOTIFY videoMetaChanged)
-    Q_PROPERTY(QImage resultImage READ resultImage NOTIFY resultImageChanged)
+    Q_PROPERTY(QString resultImagePath READ resultImagePath NOTIFY resultImageChanged)
     Q_PROPERTY(int outputSize READ outputSize WRITE setOutputSize NOTIFY outputSizeChanged)
     Q_PROPERTY(int sampleCount READ sampleCount WRITE setSampleCount NOTIFY sampleCountChanged)
     Q_PROPERTY(bool isIris READ isIris WRITE setIsIris NOTIFY isIrisChanged)
@@ -34,7 +34,7 @@ public:
     int progress() const { return m_progress; }
     QString videoPath() const { return m_videoPath; }
     QVariantMap videoMeta() const { return m_videoMeta; }
-    QImage resultImage() const { return m_resultImage; }
+    QString resultImagePath() const { return m_resultImagePath; }
     int outputSize() const { return m_outputSize; }
     int sampleCount() const { return m_sampleCount; }
     bool isIris() const { return m_isIris; }
@@ -52,6 +52,7 @@ public slots:
     void resume();
     void cancel();
     void saveResult(const QString &path);
+    void resetToDefaults();
 
 signals:
     void statusChanged();
@@ -75,6 +76,7 @@ private:
     QString m_videoPath;
     QVariantMap m_videoMeta;
     QImage m_resultImage;
+    QString m_resultImagePath;
     int m_outputSize = 1024;
     int m_sampleCount = 1000;
     bool m_isIris = true;

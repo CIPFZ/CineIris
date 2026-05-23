@@ -82,7 +82,7 @@ QImage BarcodeGenerator::generateBarcode()
     const AVCodec *codec = avcodec_find_decoder(codecPar->codec_id);
     AVCodecContext *codecCtx = avcodec_alloc_context3(codec);
     avcodec_parameters_to_context(codecCtx, codecPar);
-    codecCtx->thread_count = 0; // auto thread count
+    codecCtx->thread_count = 0;
 
     if (avcodec_open2(codecCtx, codec, nullptr) < 0) {
         avcodec_free_context(&codecCtx);
@@ -92,7 +92,7 @@ QImage BarcodeGenerator::generateBarcode()
     }
 
     int targetH = 600;
-    int cropW = 1; // optimized: only need 1 column
+    int cropW = 1;
     int srcCenterX = codecPar->width / 2;
 
     SwsContext *sws = sws_getContext(
@@ -108,6 +108,7 @@ QImage BarcodeGenerator::generateBarcode()
     uint8_t *buffer = (uint8_t *)av_malloc(numBytes);
     av_image_fill_arrays(frameRGB->data, frameRGB->linesize, buffer, AV_PIX_FMT_RGB24, cropW, targetH, 1);
 
+    // Calculate target PTS values
     int64_t totalDuration = videoSt->duration;
     AVRational timeBase = videoSt->time_base;
     if (totalDuration <= 0) {
@@ -120,30 +121,34 @@ QImage BarcodeGenerator::generateBarcode()
     int maxStripes = m_sampleCount;
     if (maxStripes <= 0) maxStripes = 1000;
 
+    QVector<int64_t> targetPts;
+    targetPts.reserve(maxStripes);
+    int64_t step = totalDuration / maxStripes;
+    for (int i = 0; i < maxStripes; ++i)
+        targetPts.append(i * step);
+
     QImage linearMap(maxStripes, targetH, QImage::Format_RGB888);
     linearMap.fill(Qt::black);
 
-    int64_t step = totalDuration / maxStripes;
-    int currentStripe = 0;
+    // Seek to beginning and do a single sequential pass
+    av_seek_frame(fmtCtx, videoIdx, 0, AVSEEK_FLAG_BACKWARD);
+    avcodec_flush_buffers(codecCtx);
 
-    for (int i = 0; i < maxStripes; ++i) {
+    int targetIdx = 0;
+    bool done = false;
+
+    while (targetIdx < maxStripes && !done && av_read_frame(fmtCtx, pkt) >= 0) {
         // Check pause/cancel
-        while (m_paused && !m_cancelled) {
+        while (m_paused && !m_cancelled)
             QThread::msleep(50);
-        }
         if (m_cancelled) break;
 
-        int64_t targetTs = i * step;
-        av_seek_frame(fmtCtx, videoIdx, targetTs, AVSEEK_FLAG_BACKWARD);
-        avcodec_flush_buffers(codecCtx);
-
-        bool decoded = false;
-        int attempts = 0;
-        while (av_read_frame(fmtCtx, pkt) >= 0 && attempts < 50) {
-            if (pkt->stream_index == videoIdx) {
-                if (avcodec_send_packet(codecCtx, pkt) == 0) {
-                    if (avcodec_receive_frame(codecCtx, frame) == 0) {
-                        // Scale only the center column (srcCenterX, 0, 1, srcH) → 1×targetH
+        if (pkt->stream_index == videoIdx) {
+            if (avcodec_send_packet(codecCtx, pkt) == 0) {
+                while (avcodec_receive_frame(codecCtx, frame) == 0) {
+                    int64_t pts = frame->pts;
+                    // Handle all targets that fall at or before this frame
+                    while (targetIdx < maxStripes && pts >= targetPts[targetIdx]) {
                         sws_scale(sws,
                                   (uint8_t const * const *)frame->data,
                                   frame->linesize,
@@ -151,29 +156,26 @@ QImage BarcodeGenerator::generateBarcode()
                                   frameRGB->data,
                                   frameRGB->linesize);
 
-                        // Read the single column of pixels
-                        if (currentStripe < linearMap.width()) {
-                            for (int y = 0; y < targetH; ++y) {
-                                int offset = y * frameRGB->linesize[0];
-                                uint8_t r = frameRGB->data[0][offset];
-                                uint8_t g = frameRGB->data[0][offset + 1];
-                                uint8_t b = frameRGB->data[0][offset + 2];
-                                linearMap.setPixel(currentStripe, y, qRgb(r, g, b));
-                            }
+                        for (int y = 0; y < targetH; ++y) {
+                            int offset = y * frameRGB->linesize[0];
+                            uint8_t r = frameRGB->data[0][offset];
+                            uint8_t g = frameRGB->data[0][offset + 1];
+                            uint8_t b = frameRGB->data[0][offset + 2];
+                            linearMap.setPixel(targetIdx, y, qRgb(r, g, b));
                         }
-                        decoded = true;
+                        targetIdx++;
+
+                        if (targetIdx % 20 == 0 || targetIdx == maxStripes)
+                            emit progressUpdated((int)((double)targetIdx / maxStripes * 100));
                     }
                 }
             }
-            av_packet_unref(pkt);
-            if (decoded) break;
-            attempts++;
         }
-        currentStripe++;
+        av_packet_unref(pkt);
 
-        if (currentStripe % 20 == 0 || currentStripe == maxStripes) {
-            emit progressUpdated((int)((float)currentStripe / maxStripes * 100));
-        }
+        // If we've reached beyond the last target, we can stop
+        if (targetIdx >= maxStripes)
+            break;
     }
 
     av_free(buffer);
@@ -184,6 +186,6 @@ QImage BarcodeGenerator::generateBarcode()
     avcodec_free_context(&codecCtx);
     avformat_close_input(&fmtCtx);
 
-    if (m_cancelled || currentStripe == 0) return {};
-    return linearMap.copy(0, 0, qMin(currentStripe, linearMap.width()), targetH);
+    if (m_cancelled || targetIdx == 0) return {};
+    return linearMap;
 }
