@@ -1,7 +1,0 @@
-{
-  "tool_name": "WebFetch",
-  "tool_input_preview": "{\"url\":\"https://github.com/zhuzichu520/FluentUI\",\"prompt\":\"What is this FluentUI project? What are its main features, supported Qt versions, QML components available, how to install and use it, and wh...",
-  "error": "Unable to verify if domain github.com is safe to fetch. This may be due to network restrictions or enterprise security policies blocking claude.ai.",
-  "timestamp": "2026-05-23T08:49:40.615Z",
-  "retry_count": 1
-}
