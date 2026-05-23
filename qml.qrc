@@ -1,0 +1,11 @@
+<RCC>
+    <qresource prefix="/qml">
+        <file alias="Main.qml">qml/Main.qml</file>
+        <file alias="VideoDropZone.qml">qml/VideoDropZone.qml</file>
+        <file alias="ParamsPanel.qml">qml/ParamsPanel.qml</file>
+        <file alias="ResultPreview.qml">qml/ResultPreview.qml</file>
+    </qresource>
+    <qresource prefix="/res">
+        <file alias="cineiris.svg">res/cineiris.svg</file>
+    </qresource>
+</RCC>
